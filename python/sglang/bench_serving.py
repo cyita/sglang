@@ -435,9 +435,15 @@ async def async_request_openai_chat_completions(
                             else:
                                 data = json.loads(chunk)
 
-                                # Check if this chunk contains content
+                                # Check if this chunk contains the first streamed token signal.
+                                # Some providers emit reasoning/tool chunks before text content.
                                 delta = data.get("choices", [{}])[0].get("delta", {})
                                 content = delta.get("content", "")
+                                has_non_content_token_signal = bool(
+                                    delta.get("reasoning_content")
+                                    or delta.get("tool_calls")
+                                    or delta.get("function_call")
+                                )
 
                                 if content:
                                     timestamp = time.perf_counter()
@@ -455,6 +461,9 @@ async def async_request_openai_chat_completions(
 
                                     most_recent_timestamp = timestamp
                                     generated_text += content
+                                elif ttft == 0.0 and has_non_content_token_signal:
+                                    # Count first reasoning/tool stream event as TTFT.
+                                    output.ttft = time.perf_counter() - st
 
                                 # Check for usage info in final chunk
                                 output_len = (data.get("usage") or {}).get(
@@ -912,7 +921,10 @@ def calculate_metrics(
                     retokenized_itls.extend([adjusted_itl] * num_tokens)
             else:
                 itls += outputs[i].itl
-            ttfts.append(outputs[i].ttft)
+            # Skip placeholder TTFT (0.0) when streaming parser did not capture
+            # a first-token event, otherwise median TTFT can collapse to zero.
+            if outputs[i].ttft > 0.0:
+                ttfts.append(outputs[i].ttft)
 
             e2e_latencies.append(outputs[i].latency)
 
@@ -946,7 +958,8 @@ def calculate_metrics(
             if not output.success:
                 continue
 
-            token_times = [output.start_time + output.ttft]
+            first_token_offset = output.ttft if output.ttft > 0.0 else output.latency
+            token_times = [output.start_time + first_token_offset]
             current_time = token_times[0]
             for itl_value in output.itl:
                 current_time += itl_value
