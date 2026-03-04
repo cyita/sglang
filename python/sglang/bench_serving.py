@@ -463,7 +463,8 @@ async def async_request_openai_chat_completions(
                                     generated_text += content
                                 elif ttft == 0.0 and has_non_content_token_signal:
                                     # Count first reasoning/tool stream event as TTFT.
-                                    output.ttft = time.perf_counter() - st
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
 
                                 # Check for usage info in final chunk
                                 output_len = (data.get("usage") or {}).get(
