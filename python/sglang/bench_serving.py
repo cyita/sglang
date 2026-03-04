@@ -99,6 +99,7 @@ class RequestFuncOutput:
     error: str = ""
     output_len: int = 0
     start_time: float = 0.0
+    reasoning_to_content_gap: Optional[float] = None
 
     @staticmethod
     def init_new(request_func_input: RequestFuncInput):
@@ -402,6 +403,7 @@ async def async_request_openai_chat_completions(
         st = time.perf_counter()
         output.start_time = st
         most_recent_timestamp = st
+        first_non_content_timestamp: Optional[float] = None
         try:
             async with session.post(
                 url=api_url, json=payload, headers=headers
@@ -447,6 +449,13 @@ async def async_request_openai_chat_completions(
 
                                 if content:
                                     timestamp = time.perf_counter()
+                                    if (
+                                        first_non_content_timestamp is not None
+                                        and output.reasoning_to_content_gap is None
+                                    ):
+                                        output.reasoning_to_content_gap = (
+                                            timestamp - first_non_content_timestamp
+                                        )
                                     # First token
                                     if ttft == 0.0:
                                         ttft = timestamp - st
@@ -467,6 +476,7 @@ async def async_request_openai_chat_completions(
                                     ttft = timestamp - st
                                     output.ttft = ttft
                                     most_recent_timestamp = timestamp
+                                    first_non_content_timestamp = timestamp
 
                                 # Check for usage info in final chunk
                                 output_len = (data.get("usage") or {}).get(
@@ -822,6 +832,15 @@ class BenchmarkMetrics:
     p95_itl_ms: float
     p99_itl_ms: float
     max_itl_ms: float
+    content_itl_count: int
+    mean_content_itl_ms: float
+    median_content_itl_ms: float
+    p99_content_itl_ms: float
+    reasoning_to_content_gap_count: int
+    mean_reasoning_to_content_gap_ms: float
+    median_reasoning_to_content_gap_ms: float
+    p99_reasoning_to_content_gap_ms: float
+    max_reasoning_to_content_gap_ms: float
     mean_e2e_latency_ms: float
     median_e2e_latency_ms: float
     std_e2e_latency_ms: float
@@ -888,10 +907,12 @@ def calculate_metrics(
     total_input_vision = 0
     completed = 0
     itls: List[float] = []
+    content_itls: List[float] = []
     tpots: List[float] = []
     ttfts: List[float] = []
     e2e_latencies: List[float] = []
     retokenized_itls: List[float] = []
+    reasoning_to_content_gaps: List[float] = []
 
     use_retokenized_itl = (
         accept_length is not None
@@ -924,6 +945,11 @@ def calculate_metrics(
                     retokenized_itls.extend([adjusted_itl] * num_tokens)
             else:
                 itls += outputs[i].itl
+            if outputs[i].reasoning_to_content_gap is not None:
+                reasoning_to_content_gaps.append(outputs[i].reasoning_to_content_gap)
+                content_itls += outputs[i].itl[1:]
+            else:
+                content_itls += outputs[i].itl
             # Skip placeholder TTFT (0.0) when streaming parser did not capture
             # a first-token event, otherwise median TTFT can collapse to zero.
             if outputs[i].ttft > 0.0:
@@ -1038,6 +1064,19 @@ def calculate_metrics(
         p95_itl_ms=np.percentile(itls or 0, 95) * 1000,
         p99_itl_ms=np.percentile(itls or 0, 99) * 1000,
         max_itl_ms=np.max(itls or 0) * 1000,
+        content_itl_count=len(content_itls),
+        mean_content_itl_ms=np.mean(content_itls or 0) * 1000,
+        median_content_itl_ms=np.median(content_itls or 0) * 1000,
+        p99_content_itl_ms=np.percentile(content_itls or 0, 99) * 1000,
+        reasoning_to_content_gap_count=len(reasoning_to_content_gaps),
+        mean_reasoning_to_content_gap_ms=np.mean(reasoning_to_content_gaps or 0) * 1000,
+        median_reasoning_to_content_gap_ms=np.median(reasoning_to_content_gaps or 0)
+        * 1000,
+        p99_reasoning_to_content_gap_ms=np.percentile(
+            reasoning_to_content_gaps or 0, 99
+        )
+        * 1000,
+        max_reasoning_to_content_gap_ms=np.max(reasoning_to_content_gaps or 0) * 1000,
         mean_e2e_latency_ms=np.mean(e2e_latencies) * 1000,
         median_e2e_latency_ms=np.median(e2e_latencies) * 1000,
         std_e2e_latency_ms=np.std(e2e_latencies) * 1000,
@@ -1451,6 +1490,45 @@ async def benchmark(
     print("{:<40} {:<10.2f}".format("P95 ITL (ms):", metrics.p95_itl_ms))
     print("{:<40} {:<10.2f}".format("P99 ITL (ms):", metrics.p99_itl_ms))
     print("{:<40} {:<10.2f}".format("Max ITL (ms):", metrics.max_itl_ms))
+    print("{s:{c}^{n}}".format(s="Content-to-Content ITL", n=50, c="-"))
+    print("{:<40} {:<10}".format("Samples:", metrics.content_itl_count))
+    print(
+        "{:<40} {:<10.2f}".format("Mean Content ITL (ms):", metrics.mean_content_itl_ms)
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Median Content ITL (ms):", metrics.median_content_itl_ms
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format("P99 Content ITL (ms):", metrics.p99_content_itl_ms)
+    )
+    print("{s:{c}^{n}}".format(s="Reasoning/Tool to Content Gap", n=50, c="-"))
+    print(
+        "{:<40} {:<10}".format(
+            "Samples:", metrics.reasoning_to_content_gap_count
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Mean Gap (ms):", metrics.mean_reasoning_to_content_gap_ms
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Median Gap (ms):", metrics.median_reasoning_to_content_gap_ms
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "P99 Gap (ms):", metrics.p99_reasoning_to_content_gap_ms
+        )
+    )
+    print(
+        "{:<40} {:<10.2f}".format(
+            "Max Gap (ms):", metrics.max_reasoning_to_content_gap_ms
+        )
+    )
     print("=" * 50)
 
     resp = requests.get(base_url + "/get_server_info", headers=get_auth_headers())
@@ -1504,6 +1582,15 @@ async def benchmark(
             "std_itl_ms": metrics.std_itl_ms,
             "p95_itl_ms": metrics.p95_itl_ms,
             "p99_itl_ms": metrics.p99_itl_ms,
+            "content_itl_count": metrics.content_itl_count,
+            "mean_content_itl_ms": metrics.mean_content_itl_ms,
+            "median_content_itl_ms": metrics.median_content_itl_ms,
+            "p99_content_itl_ms": metrics.p99_content_itl_ms,
+            "reasoning_to_content_gap_count": metrics.reasoning_to_content_gap_count,
+            "mean_reasoning_to_content_gap_ms": metrics.mean_reasoning_to_content_gap_ms,
+            "median_reasoning_to_content_gap_ms": metrics.median_reasoning_to_content_gap_ms,
+            "p99_reasoning_to_content_gap_ms": metrics.p99_reasoning_to_content_gap_ms,
+            "max_reasoning_to_content_gap_ms": metrics.max_reasoning_to_content_gap_ms,
             "concurrency": metrics.concurrency,
             "accept_length": accept_length,
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
