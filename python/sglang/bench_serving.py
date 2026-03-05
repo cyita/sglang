@@ -100,6 +100,8 @@ class RequestFuncOutput:
     output_len: int = 0
     start_time: float = 0.0
     reasoning_to_content_gap: Optional[float] = None
+    saw_non_content_signal: bool = False
+    saw_content_signal: bool = False
 
     @staticmethod
     def init_new(request_func_input: RequestFuncInput):
@@ -449,6 +451,7 @@ async def async_request_openai_chat_completions(
 
                                 if content:
                                     timestamp = time.perf_counter()
+                                    output.saw_content_signal = True
                                     if (
                                         first_non_content_timestamp is not None
                                         and output.reasoning_to_content_gap is None
@@ -477,6 +480,7 @@ async def async_request_openai_chat_completions(
                                     output.ttft = ttft
                                     most_recent_timestamp = timestamp
                                     first_non_content_timestamp = timestamp
+                                    output.saw_non_content_signal = True
 
                                 # Check for usage info in final chunk
                                 output_len = (data.get("usage") or {}).get(
@@ -841,6 +845,10 @@ class BenchmarkMetrics:
     median_reasoning_to_content_gap_ms: float
     p99_reasoning_to_content_gap_ms: float
     max_reasoning_to_content_gap_ms: float
+    content_only_count: int
+    reasoning_to_content_count: int
+    reasoning_only_count: int
+    no_token_signal_count: int
     mean_e2e_latency_ms: float
     median_e2e_latency_ms: float
     std_e2e_latency_ms: float
@@ -913,6 +921,10 @@ def calculate_metrics(
     e2e_latencies: List[float] = []
     retokenized_itls: List[float] = []
     reasoning_to_content_gaps: List[float] = []
+    content_only_count = 0
+    reasoning_to_content_count = 0
+    reasoning_only_count = 0
+    no_token_signal_count = 0
 
     use_retokenized_itl = (
         accept_length is not None
@@ -950,6 +962,15 @@ def calculate_metrics(
                 content_itls += outputs[i].itl[1:]
             else:
                 content_itls += outputs[i].itl
+
+            if outputs[i].saw_non_content_signal and outputs[i].saw_content_signal:
+                reasoning_to_content_count += 1
+            elif outputs[i].saw_non_content_signal and not outputs[i].saw_content_signal:
+                reasoning_only_count += 1
+            elif not outputs[i].saw_non_content_signal and outputs[i].saw_content_signal:
+                content_only_count += 1
+            else:
+                no_token_signal_count += 1
             # Skip placeholder TTFT (0.0) when streaming parser did not capture
             # a first-token event, otherwise median TTFT can collapse to zero.
             if outputs[i].ttft > 0.0:
@@ -1077,6 +1098,10 @@ def calculate_metrics(
         )
         * 1000,
         max_reasoning_to_content_gap_ms=np.max(reasoning_to_content_gaps or 0) * 1000,
+        content_only_count=content_only_count,
+        reasoning_to_content_count=reasoning_to_content_count,
+        reasoning_only_count=reasoning_only_count,
+        no_token_signal_count=no_token_signal_count,
         mean_e2e_latency_ms=np.mean(e2e_latencies) * 1000,
         median_e2e_latency_ms=np.median(e2e_latencies) * 1000,
         std_e2e_latency_ms=np.std(e2e_latencies) * 1000,
@@ -1529,6 +1554,24 @@ async def benchmark(
             "Max Gap (ms):", metrics.max_reasoning_to_content_gap_ms
         )
     )
+    print("{s:{c}^{n}}".format(s="Token Signal Paths", n=50, c="-"))
+    print("{:<40} {:<10}".format("Content-only requests:", metrics.content_only_count))
+    print(
+        "{:<40} {:<10}".format(
+            "Reasoning/Tool -> Content requests:",
+            metrics.reasoning_to_content_count,
+        )
+    )
+    print(
+        "{:<40} {:<10}".format(
+            "Reasoning/Tool-only requests:", metrics.reasoning_only_count
+        )
+    )
+    print(
+        "{:<40} {:<10}".format(
+            "No token signal requests:", metrics.no_token_signal_count
+        )
+    )
     print("=" * 50)
 
     resp = requests.get(base_url + "/get_server_info", headers=get_auth_headers())
@@ -1591,6 +1634,10 @@ async def benchmark(
             "median_reasoning_to_content_gap_ms": metrics.median_reasoning_to_content_gap_ms,
             "p99_reasoning_to_content_gap_ms": metrics.p99_reasoning_to_content_gap_ms,
             "max_reasoning_to_content_gap_ms": metrics.max_reasoning_to_content_gap_ms,
+            "content_only_count": metrics.content_only_count,
+            "reasoning_to_content_count": metrics.reasoning_to_content_count,
+            "reasoning_only_count": metrics.reasoning_only_count,
+            "no_token_signal_count": metrics.no_token_signal_count,
             "concurrency": metrics.concurrency,
             "accept_length": accept_length,
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
